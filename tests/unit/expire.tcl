@@ -198,4 +198,46 @@ start_server {tags {"expire"}} {
         r set foo b
         lsort [r keys *]
     } {a e foo s t}
+
+    test {SETEX-optimized} {
+        r del x
+        r setex x 100 foo
+        set ttl1 [r ttl x]
+        r setex x 0 foo
+        set ttl2 [r ttl x]
+        r setex x -1 foo
+        set v [r get x]
+        set ttl3 [r ttl x]
+        catch {r setex x -10 foo} e
+        list $ttl1 $ttl2 $ttl3 $v $e
+    } {100 100 -1 foo *invalid expire*}
+
+    test {GETEX} {
+        r del x
+        r set x foo
+        set ttl1 [r ttl x]
+        set v1 [r getex x 100]
+        set ttl2 [r ttl x]
+        set v2 [r getex x 0]
+        set ttl3 [r ttl x]
+        set v3 [r getex x -10]
+        set ttl4 [r ttl x]
+        set v4 [r getex x -10]
+        list $ttl1 $ttl2 $ttl3 $ttl4 $v1 $v2 $v3 $v4
+    } {-1 100 100 -2 foo foo foo {}}
+
+    test {LRANGEEX} {
+        r del x
+        r lpush x foo bar
+        set ttl1 [r ttl x]
+        set v1 [r lrangeex x 0 -1 100]
+        set ttl2 [r ttl x]
+        set v2 [r lrangeex x 0 -1 0]
+        set ttl3 [r ttl x]
+        set v3 [r lrangeex x 0 -1 -10]
+        set ttl4 [r ttl x]
+        set v4 [r lrangeex x 0 -1 -10]
+
+        list $ttl1 $ttl2 $ttl3 $ttl4 $v1 $v2 $v3 $v4
+    } {-1 100 100 -2 {bar foo} {bar foo} {bar foo} {}}
 }

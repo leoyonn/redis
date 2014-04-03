@@ -856,7 +856,7 @@ int expireIfNeeded(redisDb *db, robj *key) {
  *
  * unit is either UNIT_SECONDS or UNIT_MILLISECONDS, and is only used for
  * the argv[2] parameter. The basetime is always specified in milliseconds. */
-void expireGenericCommand(redisClient *c, long long basetime, int unit) {
+void expireGenericCommand(redisClient *c, long long basetime, int unit, int reply) {
     robj *key = c->argv[1], *param = c->argv[2];
     long long when; /* unix time in milliseconds when the key will expire. */
 
@@ -868,7 +868,7 @@ void expireGenericCommand(redisClient *c, long long basetime, int unit) {
 
     /* No key, return zero. */
     if (lookupKeyRead(c->db,key) == NULL) {
-        addReply(c,shared.czero);
+        if (reply) addReply(c,shared.czero);
         return;
     }
 
@@ -890,11 +890,11 @@ void expireGenericCommand(redisClient *c, long long basetime, int unit) {
         decrRefCount(aux);
         signalModifiedKey(c->db,key);
         notifyKeyspaceEvent(REDIS_NOTIFY_GENERIC,"del",key,c->db->id);
-        addReply(c, shared.cone);
+        if (reply) addReply(c, shared.cone);
         return;
     } else {
         setExpire(c->db,key,when);
-        addReply(c,shared.cone);
+        if (reply) addReply(c,shared.cone);
         signalModifiedKey(c->db,key);
         notifyKeyspaceEvent(REDIS_NOTIFY_GENERIC,"expire",key,c->db->id);
         server.dirty++;
@@ -902,20 +902,24 @@ void expireGenericCommand(redisClient *c, long long basetime, int unit) {
     }
 }
 
+void expireCommandNoReply(redisClient *c) {
+    expireGenericCommand(c,mstime(),UNIT_SECONDS, 0);
+}
+
 void expireCommand(redisClient *c) {
-    expireGenericCommand(c,mstime(),UNIT_SECONDS);
+    expireGenericCommand(c,mstime(),UNIT_SECONDS, 1);
 }
 
 void expireatCommand(redisClient *c) {
-    expireGenericCommand(c,0,UNIT_SECONDS);
+    expireGenericCommand(c,0,UNIT_SECONDS, 1);
 }
 
 void pexpireCommand(redisClient *c) {
-    expireGenericCommand(c,mstime(),UNIT_MILLISECONDS);
+    expireGenericCommand(c,mstime(),UNIT_MILLISECONDS, 1);
 }
 
 void pexpireatCommand(redisClient *c) {
-    expireGenericCommand(c,0,UNIT_MILLISECONDS);
+    expireGenericCommand(c,0,UNIT_MILLISECONDS, 1);
 }
 
 void ttlGenericCommand(redisClient *c, int output_ms) {

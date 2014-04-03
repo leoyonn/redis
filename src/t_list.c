@@ -586,6 +586,18 @@ void lrangeCommand(redisClient *c) {
     }
 }
 
+void lrangeexCommand(redisClient *c) {
+    lrangeCommand(c);
+    long long when = 0;
+    if (getLongLongFromObjectOrReply(c, c->argv[4], &when, NULL) == REDIS_OK && when != 0) {
+        /* reuse argv for expire command, change [key start stop ttl] -> [key ttl] */
+        c->argc = 3;
+        c->argv[2] = c->argv[4];
+        c->argv[3] = c->argv[4] = NULL;
+        expireCommandNoReply(c);
+    }
+}
+
 void ltrimCommand(redisClient *c) {
     robj *o;
     long start, end, llen, j, ltrim, rtrim;
