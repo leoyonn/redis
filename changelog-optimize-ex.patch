@@ -1,0 +1,259 @@
+diff --git a/changelog-optimize-ex.md b/changelog-optimize-ex.md
+new file mode 100644
+index 0000000..95b5e52
+--- /dev/null
++++ b/changelog-optimize-ex.md
+@@ -0,0 +1,27 @@
++# Change log for adding getex/lrangeex and modifying setex #
++
++@ author leo
++@ date 2014-3-24
++
++## changes ##
++1. Add command 'getex key ttl'
++  It works as 'get key && expire key ttl' exept that the 'expire' command don't has any result reply;
++    * if ttl > 0, set this key's time-to-live to ttl seconds;
++    * if ttl == 0, keep this key's time-to-live as it was;
++    * else (if ttl < 0), delete this key after get;
++
++2. Add command 'lrangeex key start stop ttl'
++  It works as 'lrange key start stop && expire key ttl', just like 'getex';
++
++3. Modify command 'setex key ttl value'
++
++  * The original version of this command means:
++      * if ttl > 0, set this key's time-to-live to ttl seconds;
++      * else (if ttl <= 0) returns error message 'ERR invalid expire time in SETEX';
++
++  * The modified version means:
++      * if ttl > 0, set this key's time-to-live to ttl seconds (same as before);
++      * if ttl == 0, keep this key's time-to-live as it was;
++      * if ttl == -1, remove this key's ttl, mark key as has no expire;
++      * else returns error message '(error) ERR invalid expire time in SETEX, should be one of -1, 0, or positive interger.'.
++
+diff --git a/src/db.c b/src/db.c
+index f80ef2a..1c000e1 100644
+--- a/src/db.c
++++ b/src/db.c
+@@ -856,7 +856,7 @@ int expireIfNeeded(redisDb *db, robj *key) {
+  *
+  * unit is either UNIT_SECONDS or UNIT_MILLISECONDS, and is only used for
+  * the argv[2] parameter. The basetime is always specified in milliseconds. */
+-void expireGenericCommand(redisClient *c, long long basetime, int unit) {
++void expireGenericCommand(redisClient *c, long long basetime, int unit, int reply) {
+     robj *key = c->argv[1], *param = c->argv[2];
+     long long when; /* unix time in milliseconds when the key will expire. */
+ 
+@@ -868,7 +868,7 @@ void expireGenericCommand(redisClient *c, long long basetime, int unit) {
+ 
+     /* No key, return zero. */
+     if (lookupKeyRead(c->db,key) == NULL) {
+-        addReply(c,shared.czero);
++        if (reply) addReply(c,shared.czero);
+         return;
+     }
+ 
+@@ -890,11 +890,11 @@ void expireGenericCommand(redisClient *c, long long basetime, int unit) {
+         decrRefCount(aux);
+         signalModifiedKey(c->db,key);
+         notifyKeyspaceEvent(REDIS_NOTIFY_GENERIC,"del",key,c->db->id);
+-        addReply(c, shared.cone);
++        if (reply) addReply(c, shared.cone);
+         return;
+     } else {
+         setExpire(c->db,key,when);
+-        addReply(c,shared.cone);
++        if (reply) addReply(c,shared.cone);
+         signalModifiedKey(c->db,key);
+         notifyKeyspaceEvent(REDIS_NOTIFY_GENERIC,"expire",key,c->db->id);
+         server.dirty++;
+@@ -902,20 +902,24 @@ void expireGenericCommand(redisClient *c, long long basetime, int unit) {
+     }
+ }
+ 
++void expireCommandNoReply(redisClient *c) {
++    expireGenericCommand(c,mstime(),UNIT_SECONDS, 0);
++}
++
+ void expireCommand(redisClient *c) {
+-    expireGenericCommand(c,mstime(),UNIT_SECONDS);
++    expireGenericCommand(c,mstime(),UNIT_SECONDS, 1);
+ }
+ 
+ void expireatCommand(redisClient *c) {
+-    expireGenericCommand(c,0,UNIT_SECONDS);
++    expireGenericCommand(c,0,UNIT_SECONDS, 1);
+ }
+ 
+ void pexpireCommand(redisClient *c) {
+-    expireGenericCommand(c,mstime(),UNIT_MILLISECONDS);
++    expireGenericCommand(c,mstime(),UNIT_MILLISECONDS, 1);
+ }
+ 
+ void pexpireatCommand(redisClient *c) {
+-    expireGenericCommand(c,0,UNIT_MILLISECONDS);
++    expireGenericCommand(c,0,UNIT_MILLISECONDS, 1);
+ }
+ 
+ void ttlGenericCommand(redisClient *c, int output_ms) {
+diff --git a/src/redis.c b/src/redis.c
+index 03268be..8d209a0 100644
+--- a/src/redis.c
++++ b/src/redis.c
+@@ -118,6 +118,7 @@ struct redisCommand *commandTable;
+  */
+ struct redisCommand redisCommandTable[] = {
+     {"get",getCommand,2,"r",0,NULL,1,1,1,0,0},
++    {"getex",getexCommand,3,"rwm",0,NULL,1,1,1,0,0},
+     {"set",setCommand,-3,"wm",0,NULL,1,1,1,0,0},
+     {"setnx",setnxCommand,3,"wm",0,NULL,1,1,1,0,0},
+     {"setex",setexCommand,4,"wm",0,NULL,1,1,1,0,0},
+@@ -148,6 +149,7 @@ struct redisCommand redisCommandTable[] = {
+     {"lindex",lindexCommand,3,"r",0,NULL,1,1,1,0,0},
+     {"lset",lsetCommand,4,"wm",0,NULL,1,1,1,0,0},
+     {"lrange",lrangeCommand,4,"r",0,NULL,1,1,1,0,0},
++    {"lrangeex",lrangeexCommand,5,"rwm",0,NULL,1,1,1,0,0},
+     {"ltrim",ltrimCommand,4,"w",0,NULL,1,1,1,0,0},
+     {"lrem",lremCommand,4,"w",0,NULL,1,1,1,0,0},
+     {"rpoplpush",rpoplpushCommand,3,"wm",0,NULL,1,2,1,0,0},
+diff --git a/src/redis.h b/src/redis.h
+index 35345d3..02eda6a 100644
+--- a/src/redis.h
++++ b/src/redis.h
+@@ -1310,6 +1310,7 @@ void setnxCommand(redisClient *c);
+ void setexCommand(redisClient *c);
+ void psetexCommand(redisClient *c);
+ void getCommand(redisClient *c);
++void getexCommand(redisClient *c);
+ void delCommand(redisClient *c);
+ void existsCommand(redisClient *c);
+ void setbitCommand(redisClient *c);
+@@ -1344,6 +1345,7 @@ void rpopCommand(redisClient *c);
+ void llenCommand(redisClient *c);
+ void lindexCommand(redisClient *c);
+ void lrangeCommand(redisClient *c);
++void lrangeexCommand(redisClient *c);
+ void ltrimCommand(redisClient *c);
+ void typeCommand(redisClient *c);
+ void lsetCommand(redisClient *c);
+@@ -1371,6 +1373,7 @@ void infoCommand(redisClient *c);
+ void mgetCommand(redisClient *c);
+ void monitorCommand(redisClient *c);
+ void expireCommand(redisClient *c);
++void expireCommandNoReply(redisClient *c);
+ void expireatCommand(redisClient *c);
+ void pexpireCommand(redisClient *c);
+ void pexpireatCommand(redisClient *c);
+diff --git a/src/t_list.c b/src/t_list.c
+index 70f5cf1..76de086 100644
+--- a/src/t_list.c
++++ b/src/t_list.c
+@@ -586,6 +586,18 @@ void lrangeCommand(redisClient *c) {
+     }
+ }
+ 
++void lrangeexCommand(redisClient *c) {
++    lrangeCommand(c);
++    long long when = 0;
++    if (getLongLongFromObjectOrReply(c, c->argv[4], &when, NULL) == REDIS_OK && when != 0) {
++        /* reuse argv for expire command, change [key start stop ttl] -> [key ttl] */
++        c->argc = 3;
++        c->argv[2] = c->argv[4];
++        c->argv[3] = c->argv[4] = NULL;
++        expireCommandNoReply(c);
++    }
++}
++
+ void ltrimCommand(redisClient *c) {
+     robj *o;
+     long start, end, llen, j, ltrim, rtrim;
+diff --git a/src/t_string.c b/src/t_string.c
+index 41e4b3b..d4e0095 100644
+--- a/src/t_string.c
++++ b/src/t_string.c
+@@ -68,8 +68,17 @@ void setGenericCommand(redisClient *c, int flags, robj *key, robj *val, robj *ex
+     if (expire) {
+         if (getLongLongFromObjectOrReply(c, expire, &milliseconds, NULL) != REDIS_OK)
+             return;
+-        if (milliseconds <= 0) {
+-            addReplyError(c,"invalid expire time in SETEX");
++        if (milliseconds == 0) {
++            milliseconds = getExpire(c->db, key);
++            unit = UNIT_MILLISECONDS;
++            if (milliseconds != -1) {
++                milliseconds = milliseconds - mstime();
++            }
++        }
++        if (milliseconds == -1) {
++            expire = NULL;
++        } else if (milliseconds < 0) {
++            addReplyError(c,"invalid expire time in SETEX, should be one of -1, 0, or positive interger.");
+             return;
+         }
+         if (unit == UNIT_SECONDS) milliseconds *= 1000;
+@@ -161,6 +170,14 @@ void getCommand(redisClient *c) {
+     getGenericCommand(c);
+ }
+ 
++void getexCommand(redisClient *c) {
++    if (getGenericCommand(c) == REDIS_ERR) return;
++    long long when = 0;
++    if (getLongLongFromObjectOrReply(c, c->argv[2], &when, NULL) == REDIS_OK && when != 0) {
++        expireCommandNoReply(c);
++    }
++}
++
+ void getsetCommand(redisClient *c) {
+     if (getGenericCommand(c) == REDIS_ERR) return;
+     c->argv[2] = tryObjectEncoding(c->argv[2]);
+diff --git a/tests/unit/expire.tcl b/tests/unit/expire.tcl
+index ff3dacb..92ccaaf 100644
+--- a/tests/unit/expire.tcl
++++ b/tests/unit/expire.tcl
+@@ -198,4 +198,46 @@ start_server {tags {"expire"}} {
+         r set foo b
+         lsort [r keys *]
+     } {a e foo s t}
++
++    test {SETEX-optimized} {
++        r del x
++        r setex x 100 foo
++        set ttl1 [r ttl x]
++        r setex x 0 foo
++        set ttl2 [r ttl x]
++        r setex x -1 foo
++        set v [r get x]
++        set ttl3 [r ttl x]
++        catch {r setex x -10 foo} e
++        list $ttl1 $ttl2 $ttl3 $v $e
++    } {100 100 -1 foo *invalid expire*}
++
++    test {GETEX} {
++        r del x
++        r set x foo
++        set ttl1 [r ttl x]
++        set v1 [r getex x 100]
++        set ttl2 [r ttl x]
++        set v2 [r getex x 0]
++        set ttl3 [r ttl x]
++        set v3 [r getex x -10]
++        set ttl4 [r ttl x]
++        set v4 [r getex x -10]
++        list $ttl1 $ttl2 $ttl3 $ttl4 $v1 $v2 $v3 $v4
++    } {-1 100 100 -2 foo foo foo {}}
++
++    test {LRANGEEX} {
++        r del x
++        r lpush x foo bar
++        set ttl1 [r ttl x]
++        set v1 [r lrangeex x 0 -1 100]
++        set ttl2 [r ttl x]
++        set v2 [r lrangeex x 0 -1 0]
++        set ttl3 [r ttl x]
++        set v3 [r lrangeex x 0 -1 -10]
++        set ttl4 [r ttl x]
++        set v4 [r lrangeex x 0 -1 -10]
++
++        list $ttl1 $ttl2 $ttl3 $ttl4 $v1 $v2 $v3 $v4
++    } {-1 100 100 -2 {bar foo} {bar foo} {bar foo} {}}
+ }
